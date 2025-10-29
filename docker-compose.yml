@@ -1,0 +1,104 @@
+version: "3.9"
+services:
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    environment:
+      - ACCEPT_EULA=Y
+      - SA_PASSWORD=YourStrong!Passw0rd
+      - MSSQL_PID=Developer
+    ports: ["1433:1433"]
+    healthcheck:
+      test: ["CMD", "/opt/mssql-tools18/bin/sqlcmd", "-S", "localhost", "-U", "sa", "-P", "YourStrong!Passw0rd", "-C", "-Q", "SELECT 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+    volumes:
+      - ./_data/sql:/var/opt/mssql
+
+  db-bootstrap:
+    image: mcr.microsoft.com/mssql-tools
+    depends_on:
+      sqlserver:
+        condition: service_healthy
+    volumes:
+      - ./sql:/sql
+    entrypoint: /bin/bash
+    command: -c "
+      for i in {1..60}; do /opt/mssql-tools/bin/sqlcmd -S sqlserver -U sa -P YourStrong!Passw0rd -Q 'SELECT 1' && break; echo waiting...; sleep 2; done &&
+      /opt/mssql-tools/bin/sqlcmd -S sqlserver -U sa -P YourStrong!Passw0rd -d master -i /sql/init.sql &&
+      /opt/mssql-tools/bin/sqlcmd -S sqlserver -U sa -P YourStrong!Passw0rd -d aggregator -i /sql/identity_init.sql
+    "
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.1
+    environment: { ZOOKEEPER_CLIENT_PORT: 2181, ZOOKEEPER_TICK_TIME: 2000 }
+
+  kafka:
+    image: confluentinc/cp-kafka:7.6.1
+    depends_on: [zookeeper]
+    ports: ["9092:9092"]
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    depends_on: [kafka]
+    ports: ["8080:8080"]
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+
+  aggregator-api:
+    build: { context: ./Aggregator.Api, dockerfile: Dockerfile }
+    depends_on:
+      sqlserver: { condition: service_healthy }
+      kafka: { condition: service_started }
+    environment:
+      - ASPNETCORE_URLS=http://+:8080
+      - ConnectionStrings__DefaultConnection=Server=sqlserver,1433;Database=aggregator;User Id=sa;Password=YourStrong!Passw0rd;Encrypt=True;TrustServerCertificate=True;MultipleActiveResultSets=True
+      - Jwt__Issuer=BankAgg
+      - Jwt__Audience=BankAgg.Clients
+      - Jwt__Key=replace_this_prod_secret_at_least_32_chars_long____________
+      - Seed__AdminEmail=admin@bankagg.local
+      - Seed__AdminPassword=Admin123!
+    ports: ["5000:8080"]
+
+  aggregator-worker:
+    build: { context: ./Aggregator.Worker, dockerfile: Dockerfile }
+    depends_on:
+      sqlserver: { condition: service_healthy }
+      kafka: { condition: service_started }
+      fraud-scoring: { condition: service_started }
+    environment:
+      - ConnectionStrings__DefaultConnection=Server=sqlserver,1433;Database=aggregator;User Id=sa;Password=YourStrong!Passw0rd;Encrypt=True;TrustServerCertificate=True;MultipleActiveResultSets=True
+      - Kafka__BootstrapServers=kafka:9092
+      - Kafka__Topic=bank-transactions
+      - FraudScoring__BaseUrl=http://fraud-scoring:8080
+
+  banka.api:
+    build: { context: ./BankA.Api, dockerfile: Dockerfile }
+    depends_on: [kafka]
+    environment:
+      - ASPNETCORE_URLS=http://+:8080
+      - Kafka__BootstrapServers=kafka:9092
+      - Kafka__Topic=bank-transactions
+    ports: ["5001:8080"]
+
+  bankb.api:
+    build: { context: ./BankB.Api, dockerfile: Dockerfile }
+    depends_on: [kafka]
+    environment:
+      - ASPNETCORE_URLS=http://+:8080
+      - Kafka__BootstrapServers=kafka:9092
+      - Kafka__Topic=bank-transactions
+    ports: ["5002:8080"]
+
+  fraud-scoring:
+    build: { context: ./Fraud.ScoringService, dockerfile: Dockerfile }
+    environment: { ASPNETCORE_URLS: http://+:8080 }
+    ports: ["5010:8080"]

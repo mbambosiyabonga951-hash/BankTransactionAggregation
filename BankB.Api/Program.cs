@@ -1,0 +1,1 @@
+using NLog.Web; var b=WebApplication.CreateBuilder(args); b.Logging.ClearProviders(); b.Host.UseNLog(); b.Services.AddControllers(); b.Services.AddEndpointsApiExplorer(); b.Services.AddSwaggerGen(); var app=b.Build(); app.UseSwagger(); app.UseSwaggerUI(); app.MapControllers(); app.Run();
